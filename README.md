@@ -11,7 +11,7 @@ Having at least 128GB of RAM is recommended. However, the required amount of mem
 Diatools is designed to run under a Docker container. After installing Docker software, download the diatools docker image from Docker Hub. 
 
 ```
-$ docker pull compbiomed/diatools
+$ docker pull elolab/diatools:1.0
 ```
 
 ### Create a folder `dataset` on the machine where the data-analysis is done and create the following subfolders under it:
