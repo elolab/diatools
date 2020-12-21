@@ -1,6 +1,6 @@
-### About
+### About 
 
-Diatools is a software package for analyzing mass-spectrometer data acquired using data independent acquisition (DIA) mode. Currently, diatools consists of a single workflow for building a spectral library from data dependent aquisition mode (DDA) data and for analyzing DIA samples with the spectral library. The spectral library is built according to the protocol described in Schubert et al. 2015. The DIA data analysis is done with OpenSWATH software and the end result is a peptide intensity matrix. Optionally, a differential expression analysis of sample groups is performed.
+Diatools 1.0 is a software package for analyzing mass-spectrometer data acquired using data independent acquisition (DIA) mode. Currently, diatools consists of a single workflow for building a spectral library from data dependent aquisition mode (DDA) data and for analyzing DIA samples with the spectral library. The spectral library is built according to the protocol described in Schubert et al. 2015. The DIA data analysis is done with OpenSWATH software and the end result is a peptide intensity matrix. Optionally, a differential expression analysis of sample groups is performed.
 
 Diatools runs on GNU/Linux, Windows and macOS platforms. However, the conversion of the mass-spectrometer proprietary raw files to open formats has to be done on Windows operating system.
 
