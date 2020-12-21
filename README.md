@@ -1,47 +1,30 @@
-### About 
+# DIAtools 2.0
 
-Diatools 1.0 is a software package for analyzing mass-spectrometer data acquired using data independent acquisition (DIA) mode. Currently, diatools consists of a single workflow for building a spectral library from data dependent aquisition mode (DDA) data and for analyzing DIA samples with the spectral library. The spectral library is built according to the protocol described in Schubert et al. 2015. The DIA data analysis is done with OpenSWATH software and the end result is a peptide intensity matrix. Optionally, a differential expression analysis of sample groups is performed.
+### About
 
-Diatools runs on GNU/Linux, Windows and macOS platforms. However, the conversion of the mass-spectrometer proprietary raw files to open formats has to be done on Windows operating system.
+DIAtools 2.0 is a software package for analyzing mass spectrometry data acquired using *data independent acquisition* (DIA) mode. It runs on x86/64 platforms supported by Docker. Having at least 128 GB RAM is recommended running the example dataset presented in this Documentation.
 
-Having at least 128GB of RAM is recommended. However, the required amount of memory depends greatly on the size of protein sequence database.
+### Download the DIAtools 2.0
 
-### Download the diatools workflow.
-
-Diatools is designed to run under a Docker container. After installing Docker software, download the diatools docker image from Docker Hub. 
+DIAtools 2.0 is designed to run under a Docker container. After installing Docker software, download the DIAtools 2.0 image from Docker Hub. 
 
 ```
-$ docker pull elolab/diatools:1.0
+$ docker pull elolab/diatools:2.0
 ```
 
-### Create a folder `dataset` on the machine where the data-analysis is done and create the following subfolders under it:
+### Download example data (12mix)
 
-* config
-* DDA
-* DIA
-* ref
-* out 
+Download the following 12mix DIA sample files from ProteomeXchange Consortium, PRIDE repository (https://www.ebi.ac.uk/pride/) identifier PXD008738.
 
-### Convert the raw mass-spectrometer files to open format
+* 170413_12mix_DIA_14.raw
+* 170413_12mix_DIA_15.raw
+* 170413_12mix_DIA_16.raw
 
-This step needs to be done on a Windows platform using ProteoWizard software.
+### Convert the raw mass spectrometry files to open format
 
-Note. Make sure filenames do not contain spaces. Convert all spaces into underscore character.
+This step needs to be done on a Windows platform using the ProteoWizard software.
 
-Convert the DDA raw files to mzXML format and do peak picking:
-
-```
-FOR %i IN (*.raw) DO \
-"\Program Files\ProteoWizard\ProteoWizard 3.0.11252\qtofpeakpicker.exe" \
---resolution=2000 \
---area=1 \
---threshold=1 \
---smoothwidth=1.1 \
---in %i \
---out %~ni.mzXML
-```
-
-Convert the DIA raw files to mzML format by using the MSConvert program from the ProteoWizard software. Use the following options:
+Convert the DIA raw files to mzML format using the MSConvert program from the ProteoWizard software with the following options:
 
 * Output format: mzML
 * Extension: empty
@@ -55,17 +38,20 @@ Convert the DIA raw files to mzML format by using the MSConvert program from the
 * Use numpress short positive integer compression: unchecked
 * Only titleMaker filter
 
-### Construct a database FASTA file
 
-Create a sequence database FASTA file that contains following protein sequences:
+### Create and populate the following folder structure
 
-* Proteins of interest (for example Swiss-Prot Human)
-* IRT peptides (Biognosys|iRT-Kit_WR_fusion)
-* Peptides related to lysis (Uniprot ID: Q7M135)
-* Digestion enzyme (typically Trypsin (Uniprot ID: P00761))
-* Possible contaminants 
+Create the following folder structure under a selected local path, referred to as LOCALPATH here.
 
-Copy the FASTA file to the `dataset/ref` folder with the name "sequences.fasta".
+* Create folder `out` for the results.
+* Create folders `data/12mix/DDA`, `data/12mix/DIA` and `data/ref`.
+* Copy converted mzML files to `data/12mix/DIA`.
+* Copy and unpack the integrated non-redundant gene catalog (IGC, amino acid sequences, fasta) from ftp://ftp.cngb.org/pub/SciRAID/Microbiome/humanGut_9.9M/GeneCatalog/IGC.pep.gz to `data/ref`.
+* Download human proteins as fasta from https://www.uniprot.org/ to `data/ref`. 
+* Download trypsin ("sp|P00761|TRYP_PIG Trypsin") amino acid sequence as fasta to `data/ref`.
+* Download lysis related enzyme ("sp|Q7M135|LYSC_LYSEN Lysyl endopeptidase OS=Lysobacter enzymogenes PE=1 SV=1") amino acid sequence as fasta to `data/ref`.
+* Download iRT peptides (Biognosys|iRT-Kit_WR_fusion) as fasta to `data/ref`.
+
 
 ### Customize peptide search parameters of the spectral library (OPTIONAL)
 
@@ -79,7 +65,7 @@ Below is the summary of the settings:
 * Fixed modification: Carbamidomethyl (C)
 * Variable modification: Oxidation (M)
 
-The search parameters can be customized by modifying `comet.params.template` and `xtandem_settings.xml` and copying the files to `dataset/config`. The modified files are given to the pipeline with the following extra parameters:
+The search parameters can be customized by modifying `comet.params.template` and `xtandem_settings.xml` and copying the files to `data/config`. The modified files are provided with the following extra parameters:
 
 ```
 --comet-cfg-template config/comet.params.template
@@ -89,105 +75,98 @@ The search parameters can be customized by modifying `comet.params.template` and
 
 ### Run the analysis 
 
-Create a spectral library from the DDA files and analyze the DIA files against the library:
+Analyze the DIA files:
 
 ```
-$ docker run --rm \
--v /LOCALPATH/dataset/:/dataset \
---workdir /dataset/out \
+$ docker run -it --rm \
 -u $(id -u):$(id -g) \
-compbiomed/diatools \
-/opt/diatools/dia-pipeline.py \
---in-DDA-mzXML ../DDA/*.mzXML \
---in-DIA-mzML ../DIA/*.mzML \
---db ../ref/sequences.fasta \
---use-comet \
---use-xtandem 
+-v /LOCALPATH/data/:/data \
+-v /LOCALPATH/out:/run-files \
+diatools:2.0 /opt/diatools/dia-pipeline.py \
+--project-name my-first-analysis \
+--sample-data /data/12mix/DIA/mzML/170413_12mix_DIA_14.mzML /data/12mix/DIA/mzML/170413_12mix_DIA_15.mzML /data/12mix/DIA/mzML/170413_12mix_DIA_16.mzML
+--databases /data/ref/IGC.pep.fasta /data/ref/irtfusion.fasta /data/ref/uniprot_human.fasta /data/ref/trypsin.fasta /data/ref/Q7M135.fasta
 ```
 
-Note, there might be need to modify the command above slightly if operating system is not Linux. For example, dataset path in windows command prompt should be: `-v //c/LOCALPATH/dataset:/dataset`, where c is the drive letter. Furthermore on windows command prompt `-u $(id -u):$(id -g)` parameter must be omitted.
+Note, there might be need to modify the command above slightly if the operating system is not Linux. For example, dataset path in Windows command prompt should be: `-v //c/LOCALPATH/data:/data`, where c is the drive letter. Furthermore on Windows command prompt `-u $(id -u):$(id -g)` parameter must be omitted. \
+\
+After the processing has completed, the "out" folder contains `dia-peptide-matrix.tsv` and `dia-protein-matrix.tsv` files. The files are TSV formatted and can be loaded to spreadsheet programs like MS Excel or to a statistical analysis program like R. The `dia-peptide-matrix.tsv` contains the detected peptides and their intensity for each of the samples. The first column contains the peptide sequence and a list of possible source proteins. The rest of the columns indicate the samples and contain the peptide intensity values in each sample. Similarly, `dia-protein-matrix.tsv` contains the intensity values at the protein level. \
+\
+To perform an optional differential expression analysis between the sample groups, the groups must be provided using an additional parameter in the command: --design-file <designFilename>. The design file must be defined as a tab-separated file (see `example-design-file.tsv`), where the column Filename refers to the filename of a sample, the column Condition is the group to which the sample belongs, the column BioReplicate refers to the biological replicate, and the column Run to the MS run.
 
-After the pipeline has completed, the "out" folder contains `dia-peptide-matrix.tsv` and `dia-protein-matrix.tsv` files. The files are TSV formatted and can be loaded to spreadsheet programs like MS Excel or to a statistical analysis programs like R. The `dia-peptide-matrix.tsv` contains detected peptides and their intensity for each of the samples. The first column contains peptide sequence and a list of possible source proteins. Rest of the columns indicate samples and contain peptide intensity value in each of the samples. Respectively `dia-protein-matrix.tsv` contains intensity values, but at protein level.
-
-To perform the optional differential expression analysis between sample groups, the groups must be provided using an additional parameter in the command:
-
-```
---design-file <designFilename>
-```
-
-The design file must be defined as a tab-separated file (see `example-design-file.tsv`), where the column Filename refers to the SWATH-MS filename of a sample, the column Condition is the group to which the sample belongs, the column BioReplicate refers to the biological replicate, and the column Run to the MS run.
-
-### Appendix - Get comprehensive list of pipeline parameters and descriptions
+### Annotate the peptide intensity matrix
 
 ```
-docker run --rm compbiomed/diatools /opt/diatools/dia-pipeline.py --help
+$ docker run -it --rm \
+-u $(id -u):$(id -g) \
+-v /LOCALPATH/data/:/data \
+-v /results:/run-files \
+diatools:2.0 /opt/diatools/annotate-matrix.py \
+--project-name my-first-analysis \
+--annotation-files /data/ref/IGC.annotation.summary.v2-with-header.tsv \
+--id-column 'Gene Name'
+```
+There are two optional parameters
+* --threshold (The number of different annotations after which a peptide is labeled ambiguous. Default is 2.)
+* --merge-unimods (Merge modifications by summing the intensities of peptides with the same amino acid sequence. Peptide sequences become unique.)
+
+Note, IGC.annotation.summary.v2-with-header.tsv is IGC.annotation.summary.v2.tsv file, available at IGC homepage, with the following column names as the first row:
+
+* Gene ID
+* Gene Name
+* Gene Length
+* Gene Completeness Status
+* Cohort Origin
+* Taxonomic Annotation(Phylum Level)
+* Taxonomic Annotation(Genus Level)
+* KEGG Annotation
+* eggNOG Annotation
+* Sample Occurence Frequency
+* Individual Occurence Frequency
+* KEGG Functional Categories
+* eggNOG Functional Categories
+* Cohort Assembled
+
+
+## Appendix - Use DDA data for the library (OPTIONAL)
+
+Download the following 12mix DDA sample files for library construction from ProteomeXchange Consortium, PRIDE repository (https://www.ebi.ac.uk/pride/) identifier PXD008738:
+
+* 170412_12mix_DDA_library_stock_2_2.raw
+* 170412_12mix_DDA_library_stock_2_3.raw
+* 170412_12mix_DDA_library_stock_2_4.raw  
+
+Convert the DDA raw files to mzXML format on a Windows platform using the ProteoWizard software.
 
 ```
-### Appendix - Modify false discovery rate
-
-False discovery rate (FDR) of the library building can be adjusted with `--library-FDR` parameter. TRIC feature alignment FDR can be adjusted with `--feature-alignment-FDR` parameter. A comprehensive list of pipeline parameters can be obtained with following command:
-
-### Appendix - Deploy the Docker image as a container with SSH-access.
-
-The build process might take a while. Once the image build is completed create a container using the image by running the command below:
-
-```
-$ docker run \
--d \
--p 2222:22 \
---cap-add SYS_ADMIN \
---device /dev/fuse \
---security-opt apparmor:unconfined \
-openms \
-/usr/sbin/sshd -D
+FOR %i IN (*.raw) DO \
+"\Program Files\ProteoWizard\ProteoWizard 3.0.11252\qtofpeakpicker.exe" \
+--resolution=2000 \
+--area=1 \
+--threshold=1 \
+--smoothwidth=1.1 \
+--in %i \
+--out %~ni.mzXML
 ```
 
-(Optional) Copy ssh-key to the running container. If this step is done, password is not asked at login. The password being asked is: "Ymko7WFcLfe4U".
+Run the previously described DIA analysis steps with the following modifications:
+
+Copy converted mzXML files to `/LOCALPATH/data/12mix/DDA`
+
+Add the following additional parameter to dia-pipeline.py indicating that the library data comes from DDA samples and run the analysis.
 
 ```
-ssh-copy-id "-p 222 root@localhost"
+--library-data /data/12mix/DDA/mzXML-peak-picked/170412_12mix_DDA_library_stock_2_2.mzXML /data/12mix/DDA/mzXML-peak-picked/170412_12mix_DDA_library_stock_2_3.mzXML /data/12mix/DDA/mzXML-peak-picked/170412_12mix_DDA_library_stock_2_4.mzXML  
 ```
 
-The environment is now up and running. There is an SSH-server listening at port 2222. Log into the environment by using a persistent screen session:
+### Appendix - Modify false discovery rate (OPTIONAL)
 
-```
-ssh -t -p 2222 root@localhost screen -R -d
-```
+False discovery rate (FDR) of the library building can be adjusted with `--library-FDR` parameter. TRIC feature alignment FDR can be adjusted with `--feature-alignment-FDR` parameter.
 
-Login. If the ssh-key is not copied you need to give the root password: "Ymko7WFcLfe4U". Now you should be in the environment. Mount the path with your data from some machine over ssh. You can replace the ip address `172.17.0.1` with your machine address that contains the data.
 
-```
-# sshfs -o allow_other my_user_name@172.17.0.1:/my/path/to/datafiles /mnt
-```
-
-Now the environment should be ready and your data can be found from `/mnt`. 
-
-### Appendix - Build the diatools Docker image by using Dockerfile in this repository.
+### Appendix - Build the DIAtools 2.0 Docker image using the Dockerfile in this repository.
 
 ```
 $ docker build -t diatools . -f Dockerfile
 ```
-
-### Appendix - Run analysis with Singularity instead of Docker
-
-
-Convert Docker image to Singularity image: 
-
-```
-$ singularity build diatools-1.0.sif docker-archive://diatools-docker.img
-```
-
-Run diatools:
-
-```
-$ singularity exec \
---bind /LOCALPATH/data/:/metaproteomics diatools-1.0.sif \
-/opt/diatools/dia-pipeline.py \
---in-DDA-mzXML /metaproteomics/lib1.mzXML /metaproteomics/lib2.mzXML \
---in-DIA-mzML /metaproteomics/sample1.mzML /metaproteomics/sample2.mzML \
---use-comet \
---use-xtandem \
---db sequences.fasta
-```
-
 

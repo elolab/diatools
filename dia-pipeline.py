@@ -14,6 +14,15 @@ import types
 import tempfile
 import shlex
 import xml.etree.ElementTree as ET
+from Bio import SeqIO
+import psutil
+import math
+import json
+import threading
+
+import workflow
+
+from progress import Progress
 
 class NonZeroReturnValueException(Exception):
     def __init__(self, returnvalue, msg):
@@ -21,632 +30,49 @@ class NonZeroReturnValueException(Exception):
         self.returnvalue = returnvalue
         return
 
-def  logline(text):
+def logline(log_fh, text):
     log_fh.write(text+"\n")
     log_fh.flush()
     return
 
+big_lock = threading.Lock()
+notification_lock = threading.Lock()
+notifications = []
 
-def decoyDB(db_fasta_fh):
-
-    db_name = None
-    with open("DB_with_decoys.fasta", "w") as decoy_ref_fh:
-        cmd = [
-               "/opt/OpenMS/bin/DecoyDatabase",
-               "-in", db_fasta_fh.name,
-               "-out", decoy_ref_fh.name,
-               ]
-        logline("Running pipeline command: "+" ".join(cmd))
-        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
-        proc.wait()
-        log_fh.flush()
-        if proc.returncode != 0:
-            raise NonZeroReturnValueException(proc.returncode, 'DecoyDatabase')
-        db_name = decoy_ref_fh.name
-    return db_name
-
-def runMSGFPlus(DDA_DB_filename, DDA_filenames, threads):
-
-    DDA_pep_xmls = []
-    
-    for DDA_filename in DDA_filenames:
-        
-        basename = os.path.basename(DDA_filename)
-        
-        if os.path.exists(os.path.splitext(basename)[0]+".pepXML"):
-            print (os.path.split(basename)[0]+".pepXML exists, skipping MSGF+")
-            DDA_pep_xmls.append(os.path.splitext(basename)[0]+".pepXML")
-            
-        else:
-            
-            msgf_cmd = [
-                "java",
-                "-Xmx120g",
-                "-jar", "/opt/msgfplus/MSGFPlus.jar",
-                "-d", DDA_DB_filename,
-                "-s", DDA_filename,
-                "-t", "10ppm",
-                "-thread", threads,
-                "-m", "3",
-                "-tda", "0",
-                "-o", os.path.splitext(basename)[0]+".mzid"
-                ]
-
-            
-            logline("Running pipeline command: "+" ".join(msgf_cmd))
-            msgf_proc = subprocess.Popen(msgf_cmd, stdout=log_fh, stderr=log_fh)
-            msgf_proc.wait()
-            log_fh.flush()
-            if msgf_proc.returncode != 0:
-                raise NonZeroReturnValueException(msgf_proc.returncode, 'MSGF+')
-
-            idconvert_cmd = [
-                "/opt/tpp/bin/idconvert", os.path.splitext(basename)[0]+".mzid",
-                "--pepXML"
-            ]
-
-            logline("Running pipeline command: "+" ".join(idconvert_cmd))
-            idconvert_proc = subprocess.Popen(idconvert_cmd, stdout=log_fh, stderr=log_fh)
-            idconvert_proc.wait()
-            log_fh.flush()
-            if idconvert_proc.returncode != 0:
-                raise NonZeroReturnValueException(idconvert_proc.returncode, 'idconvert')
-
-            DDA_pep_xmls.append(os.path.splitext(basename)[0]+".pepXML")
-           
-    if os.path.exists("interact_msgf_pep.xml"):
-        print ("interact_msgf_pep.xml file already exist, skipping merging comet files.")        
-    else:
-        xinteract_cmd = [
-            "/opt/tpp/bin/xinteract",
-            "-OARPd",
-            "-dDECOY_",
-            "-Ninteract_msgf_pep.xml",
-            ]
-        xinteract_cmd.extend(DDA_pep_xmls)
-        logline("Running pipeline command: "+" ".join(xinteract_cmd))
-        xinteract_proc = subprocess.Popen(xinteract_cmd, stdout=log_fh, stderr=log_fh)
-        xinteract_proc.wait()
-        log_fh.flush()
-        if xinteract_proc.returncode != 0:
-            raise NonZeroReturnValueException(xinteract_proc.returncode, 'xinteract')
-       
-    return
-   
-        
-def runComet(comet_cfg_templateFile, DDA_DB_filename, DDA_filenames):
-
-    DDA_basenames = []
-    DDA_pep_xmls = []
-    for DDA_filename in DDA_filenames:
-        basename = os.path.basename(DDA_filename)
-        if not os.path.islink(basename):
-            os.symlink(DDA_filename, basename)
-        DDA_basenames.append(basename)
-        DDA_pep_xmls.append(os.path.splitext(basename)[0]+".pep.xml")
-    with open(comet_cfg_templateFile) as fh:
-        txt = fh.read()
-        txt = txt.replace("DATABASE_FASTA_FILE", DDA_DB_filename)
-        comet_cfg_tmp_fd = \
-                           tempfile.NamedTemporaryFile(dir=worktempdir, \
-                                                       mode="r+", \
-                                                       delete=delete_temp_files_flag)
-        comet_cfg_tmp_fd.write(txt)
-        comet_cfg_tmp_fd.flush()
-
-    pep_xmls_exists = True
-
-    for DDA_pep_xml in DDA_pep_xmls:
-        pep_xmls_exists &= os.path.exists(DDA_pep_xml)
-
-    if pep_xmls_exists:
-        print ("Comet pep xml files already exist, skipping comet.")
-    else:
-        cmd = [
-            "/opt/comet/comet-ms",
-            "-P"+comet_cfg_tmp_fd.name,
-            ]
-        cmd.extend(DDA_basenames)
-        logline("Running pipeline command: "+" ".join(cmd))
-        comet_proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
-        comet_proc.wait()
-        log_fh.flush()
-        if comet_proc.returncode != 0:
-            raise NonZeroReturnValueException(comet_proc.returncode, 'Comet')
-
-
-    if os.path.exists("interact_comet_pep.xml"):
-        print ("interact_comet_pep.xml file already exist, skipping merging comet files.")        
-    else:
-        xinteract_cmd = [
-            "/opt/tpp/bin/xinteract",
-            "-OARPd",
-            "-dDECOY_",
-            "-Ninteract_comet_pep.xml",
-            ]
-        xinteract_cmd.extend(DDA_pep_xmls)
-        logline("Running pipeline command: "+" ".join(xinteract_cmd))
-        xinteract_proc = subprocess.Popen(xinteract_cmd, stdout=log_fh, stderr=log_fh)
-        xinteract_proc.wait()
-        log_fh.flush()
-        if xinteract_proc.returncode != 0:
-            raise NonZeroReturnValueException(xinteract_proc.returncode, 'xinteract')
-    return
-
-
-
-def runXTandem(xtandem_default_input_filename, \
-               DDA_DB_filename, \
-               DDA_filenames):
-    taxonomy_tmp_fd = \
-                        tempfile.NamedTemporaryFile(dir=worktempdir, \
-                                                    mode="r+", \
-                                                    delete=delete_temp_files_flag)
-    taxonomy_xml = '<?xml version="1.0"?>\n'
-    taxonomy_xml += '<bioml label="x! taxon-to-file matching list">\n'
-    taxonomy_xml += '<taxon label="DB">\n'
-    taxonomy_xml += '<file format="peptide" URL="' + DDA_DB_filename + '" />\n'
-    taxonomy_xml += '</taxon>\n'
-    taxonomy_xml += '</bioml>\n'
-    taxonomy_tmp_fd.write(taxonomy_xml)
-    taxonomy_tmp_fd.flush()
-
-    DDA_pep_xmls = {}
-    for DDA_filename in DDA_filenames:
-        basename = os.path.basename(DDA_filename)
-        DDA_pep_xmls[DDA_filename]=os.path.splitext(basename)[0]+".tandem.pep.xml"
-
-    tandem_outs = {}
-    for DDA_filename in DDA_filenames:
-
-        print ("Xtandem round with: " + DDA_pep_xmls[DDA_filename])
-        
-        if os.path.exists(DDA_pep_xmls[DDA_filename]):
-            print (DDA_pep_xmls[DDA_filename] + " already exists, skipping xtandem")
-            continue
-
-        # tandem_outs[DDA_filename] = \
-        #                             tempfile.NamedTemporaryFile(dir=worktempdir, \
-        #                                                         mode="r+", \
-        #                                                         delete=delete_temp_files_flag)
-
-        basename = os.path.basename(DDA_filename)
-        tandem_outs[DDA_filename] = os.path.splitext(basename)[0]+".TANDEM.OUTPUT.xml"
-        
-        input_xml = '<?xml version="1.0"?>\n'
-        input_xml += '<bioml>\n'
-        input_xml += '<note type="input" label="list path, default parameters">' + xtandem_default_input_filename + '</note>\n'
-        input_xml += '<note type="input" label="list path, taxonomy information">'+taxonomy_tmp_fd.name+'</note>\n'
-        input_xml += '<note type="input" label="protein, taxon">DB</note>\n'
-        input_xml += '<note type="input" label="spectrum, path">' + DDA_filename + '</note>\n'
-        input_xml += '<note type="input" label="output, path">' + tandem_outs[DDA_filename] + '</note>\n'
-        input_xml += '</bioml>'
-        input_tmp_fd = \
-                       tempfile.NamedTemporaryFile(dir=worktempdir, \
-                                                   mode="r+", \
-                                                   delete=delete_temp_files_flag)
-        input_tmp_fd.write(input_xml)
-        input_tmp_fd.flush()
-        tandem_cmd = [
-            "/opt/tandem/tandem",
-            input_tmp_fd.name,
-            tandem_outs[DDA_filename]
-            ]
-
-        logline("Running pipeline command: "+" ".join(tandem_cmd))
-        tandem_proc = subprocess.Popen(tandem_cmd, stdout=log_fh, stderr=log_fh)
-        tandem_proc.wait()
-        log_fh.flush()
-        if tandem_proc.returncode != 0:
-            raise NonZeroReturnValueException(tandem_proc.returncode, 'Tandem')
-
-        tandemxml_cmd = [
-            "/opt/tpp/bin/Tandem2XML",
-            tandem_outs[DDA_filename],
-            DDA_pep_xmls[DDA_filename]
-            ]
-        logline("Running pipeline command: "+" ".join(tandemxml_cmd))
-        tandemxml_proc = subprocess.Popen(tandemxml_cmd, stdout=log_fh, stderr=log_fh)
-        tandemxml_proc.wait()
-        log_fh.flush()
-        if tandem_proc.returncode != 0:
-            raise NonZeroReturnValueException(tandemxml_proc.returncode, 'Tandem2XML')
-
-    xinteract_cmd = [
-        "/opt/tpp/bin/xinteract",
-        "-OARPd",
-        "-dDECOY_",
-        "-Ninteract_xtandem_pep.xml",
-        ]
-    xinteract_cmd.extend([DDA_pep_xmls[x] for x in DDA_pep_xmls])
-
-    logline("Running pipeline command: "+" ".join(xinteract_cmd))
-    xinteract_proc = subprocess.Popen(xinteract_cmd, stdout=log_fh, stderr=log_fh)
-    xinteract_proc.wait()
-    log_fh.flush()
-    if xinteract_proc.returncode != 0:
-        raise NonZeroReturnValueException(xinteract_proc.returncode, 'xinteract')
-    return
-
-
-
-def combine_search_engine_results(decoyPrefix, \
-                                  outputFilename, \
-                                  DDA_DB_filename, \
-                                  threads, \
-                                  pepXMLs):
-    
-    interprophetparser_cmd = [
-        "/opt/tpp/bin/InterProphetParser",
-        "DECOY="+decoyPrefix,
-        "THREADS="+threads,
-    ]
-    interprophetparser_cmd.extend(pepXMLs)
-    interprophetparser_cmd.append(outputFilename)
-
-    logline("Running pipeline command: "+" ".join(interprophetparser_cmd))
-    interprophetparser_proc = subprocess.Popen(interprophetparser_cmd, stdout=log_fh, stderr=log_fh)
-    interprophetparser_proc.wait()
-    log_fh.flush()
-    if interprophetparser_proc.returncode != 0:
-        raise NonZeroReturnValueException(interprophetparser_proc.returncode, 'InterProphetParser')
-    return
-
-
-
-def buildDIALibrary(decoyPrefix, \
-                    pepXML_filename, \
-                    DDA_DB_filename, \
-                    iRT_filename, \
-                    swaths_filename, \
-                    protFDR, \
-                    gFDR,
-                    swaths_min,
-                    swaths_max):
-
-    mayu_cmd = [
-        "/opt/tpp/bin/Mayu.pl",
-        "-A", pepXML_filename,
-        "-C", DDA_DB_filename,
-        "-E", decoyPrefix,
-        "-G", gFDR,
-        "-H", "51",
-        "-I", "2",
-        "-P", "protFDR="+str(protFDR)+":t",
-    ]
-    
-    logline("Running pipeline command: "+" ".join(mayu_cmd))
-    mayu_proc = subprocess.Popen(mayu_cmd, stdout=log_fh, stderr=log_fh)
-    mayu_proc.wait()
-    log_fh.flush()
-    if mayu_proc.returncode != 0:
-        raise NonZeroReturnValueException(mayu_proc.returncode, 'Mayu')
-
-    shell_cmd = "cat *_psm_protFDR0*.csv |cut -f 5 -d ',' |tail -n+2 |sort -u |head -n1"
-
-    logline("Running pipeline command: "+ shell_cmd)
-    shell_proc = subprocess.Popen(shell_cmd, stdout=subprocess.PIPE, stderr=log_fh, shell=True)
-    shell_proc.wait()
-    log_fh.flush()
-    if shell_proc.returncode != 0:
-        raise NonZeroReturnValueException(shell_proc.returncode, 'shell command')
-
-    cutoff = shell_proc.stdout.readline().decode("utf8").rstrip('\n')
-
-    spectrast_cmd1 = [
-        "/opt/tpp/bin/spectrast",
-        "-cNSpecLib",
-#        "-cICID-QTOF",
-        "-cIHCD",
-        "-cf", "\"Protein! ~ "+decoyPrefix+"\"",
-        "-cP"+cutoff,
-        "-c_IRT"+iRT_filename, 
-        "-c_IRR", pepXML_filename 
-    ]
-
-
-    logline("Running pipeline command: "+" ".join(spectrast_cmd1))
-    spectrast_cmd1_proc = subprocess.Popen(spectrast_cmd1, stdout=log_fh, stderr=log_fh)
-    spectrast_cmd1_proc.wait()
-    log_fh.flush()
-    if spectrast_cmd1_proc.returncode != 0:
-        raise NonZeroReturnValueException(spectrast_cmd1_proc.returncode, 'spectrast')
-
-    spectrast_cmd2 = [
-        "/opt/tpp/bin/spectrast",
-        "-cNSpecLib_cons",
-#        "-cICID-QTOF",
-        "-cIHCD",
-        "-cAC", "SpecLib.splib",
-    ]
-
-    logline("Running pipeline command: "+" ".join(spectrast_cmd2))
-    spectrast_cmd2_proc = subprocess.Popen(spectrast_cmd2, stdout=log_fh, stderr=log_fh)
-    spectrast_cmd2_proc.wait()
-    log_fh.flush()
-    if spectrast_cmd2_proc.returncode != 0:
-        raise NonZeroReturnValueException(spectrast_cmd2_proc.returncode, 'spectrast')
-
-    spectrast2tsv_cmd = [
-        "spectrast2tsv.py",
-        "-l", str(swaths_min)+","+str(swaths_max),
-        "-s", "y,b",
-        "-d",
-        "-e",
-        "-o", "6",
-        "-n", "6", 
-        "-w", swaths_filename, 
-        "-k", "openswath",
-        "-a", "SpecLib_cons_openswath.tsv",
-        "SpecLib_cons.sptxt"
-    ]    
-
-    logline("Running pipeline command: "+" ".join(spectrast2tsv_cmd))
-    spectrast2tsv_cmd_proc = subprocess.Popen(spectrast2tsv_cmd, stdout=log_fh, stderr=log_fh)
-    spectrast2tsv_cmd_proc.wait()
-    log_fh.flush()
-    if spectrast2tsv_cmd_proc.returncode != 0:
-        raise NonZeroReturnValueException(spectrast2tsv_cmd_proc.returncode, 'spectrast2tsv')
-
-
-    ConvertTSVToTraML_cmd = [
-        "/opt/OpenMS/bin/TargetedFileConverter",
-        "-in", "SpecLib_cons_openswath.tsv",
-        "-out", "SpecLib_cons.TraML"
-
-    ]
-
-    logline("Running pipeline command: "+" ".join(ConvertTSVToTraML_cmd))
-    ConvertTSVToTraML_proc = subprocess.Popen(ConvertTSVToTraML_cmd, stdout=log_fh, stderr=log_fh)
-    ConvertTSVToTraML_proc.wait()
-    log_fh.flush()
-    if ConvertTSVToTraML_proc.returncode != 0:
-        raise NonZeroReturnValueException(ConvertTSVToTraML_proc.returncode, 'TargetedFileConverter')
-
-    OpenSwathDecoyGenerator_cmd = [
-        "/opt/OpenMS/bin/OpenSwathDecoyGenerator",
-        "-in", "SpecLib_cons.TraML",
-        "-out", "SpecLib_cons_decoy.TraML",
-        "-method", "shuffle",
-        "-append",
-        "-exclude_similar",
-        "-remove_unannotated"
-        ]
-
-    logline("Running pipeline command: "+" ".join(OpenSwathDecoyGenerator_cmd))
-    OpenSwathDecoyGenerator_proc = subprocess.Popen(OpenSwathDecoyGenerator_cmd, stdout=log_fh, stderr=log_fh)
-    OpenSwathDecoyGenerator_proc.wait()
-    log_fh.flush()
-    if OpenSwathDecoyGenerator_proc.returncode != 0:
-        raise NonZeroReturnValueException(OpenSwathDecoyGenerator_proc.returncode, 'OpenSwathDecoyGenerator')    
-
-    return
-
-
-
-def buildDIAMatrix(DIA_filenames, \
-                   fixed_swaths_filename, \
-                   target_FDR, \
-                   max_FDR, \
-                   threads, \
-                   irt_assay_library_traml,\
-                   design_file):    
-
-
-    successfull_DIA_filenames = []
-    
-    for DIA_filename in DIA_filenames:
-
-        if os.path.exists(os.path.basename(DIA_filename)+"-DIA.tsv"):
-            print (os.path.basename(DIA_filename)+"-DIA.tsv" + " exists, skiping openswathworkflow")
-            successfull_DIA_filenames.append(DIA_filename)
-            
-
-        else:
-        
-            OpenSwathWorkflow_cmd = [
-                "/opt/OpenMS/bin/OpenSwathWorkflow",
-                "-in", DIA_filename,
-                "-tr", "SpecLib_cons_decoy.TraML", 
-                "-tr_irt", irt_assay_library_traml, 
-                "-out_tsv", os.path.basename(DIA_filename)+"-DIA.tsv", 
-                "-min_upper_edge_dist", "1",
-                "-sort_swath_maps",
-                "-swath_windows_file", fixed_swaths_filename,
-                "-force",
-                "-threads", threads
-
-            ]
-
-            logline("Running pipeline command: "+" ".join(OpenSwathWorkflow_cmd))
-            OpenSwathWorkflow_proc = subprocess.Popen(OpenSwathWorkflow_cmd, stdout=log_fh, stderr=log_fh)
-            OpenSwathWorkflow_proc.wait()
-            log_fh.flush()
-            if OpenSwathWorkflow_proc.returncode != 0:
-                #raise NonZeroReturnValueException(OpenSwathWorkflow_proc.returncode, 'OpenSwathWorkflow')
-                logline("DIA sample "+ DIA_filename +" failed. Skipping the sample.")
-                
-            else:
-                successfull_DIA_filenames.append(DIA_filename)
-
-
-    successfull_DIA_filenames_after_pyprophet = []
-
-    for DIA_filename in successfull_DIA_filenames:
-
-        if os.path.exists(os.path.basename(DIA_filename) + "-DIA_with_dscore.csv"):
-            print (os.path.basename(DIA_filename) + "-DIA_with_dscore.csv exists, skipping pyprophet")
-            successfull_DIA_filenames_after_pyprophet.append(DIA_filename)
-        else:
-
-            pyprophet_cmd = [
-                "pyprophet",
-                "--delim=tab",
-                "--export.mayu",
-                os.path.basename(DIA_filename)+"-DIA.tsv", 
-                "--ignore.invalid_score_columns"
-            ]
-
-            logline("Running pipeline command: "+" ".join(pyprophet_cmd))
-            pyprophet_proc = subprocess.Popen(pyprophet_cmd, stdout=log_fh, stderr=log_fh)
-            pyprophet_proc.wait()
-            log_fh.flush()
-            if pyprophet_proc.returncode != 0:
-                logline("DIA sample "+ DIA_filename +" failed. Skipping the sample.")              #raise NonZeroReturnValueException(pyprophet_proc.returncode, 'pyprophet')
-            else:
-                successfull_DIA_filenames_after_pyprophet.append(DIA_filename)
-
-    feature_alignment_cmd = [
-        "feature_alignment.py",
-        "--method", "best_overall",
-        "--realign_method", "diRT",
-        "--max_rt_diff", "90",
-        "--target_fdr", target_FDR,
-        "--max_fdr_quality", max_FDR,
-        "--out", "DIA-analysis-result.csv", 
-        "--in" 
-    ]
-    feature_alignment_cmd.extend([ os.path.basename(x) + "-DIA_with_dscore.csv" for x in successfull_DIA_filenames_after_pyprophet])
-
-    logline("Running pipeline command: "+" ".join(feature_alignment_cmd))
-    feature_alignment_proc = subprocess.Popen(feature_alignment_cmd, stdout=log_fh, stderr=log_fh)
-    feature_alignment_proc.wait()
-    log_fh.flush()
-    if feature_alignment_proc.returncode != 0:
-        raise NonZeroReturnValueException(feature_alignment_proc.returncode, 'feature_alignment')
-
-
-    swaths2stats_cmd = [
-        "/opt/diatools/swaths2stats.R",
-        "--input", "DIA-analysis-result.csv"
-    ]
-
-    if design_file:
-        swaths2stats_cmd.extend(["--design-file", design_file])
-
-    logline("Running pipeline command: "+" ".join(swaths2stats_cmd))
-    swaths2stats_proc = subprocess.Popen(swaths2stats_cmd, stdout=log_fh, stderr=log_fh)
-    swaths2stats_proc.wait()
-    log_fh.flush()
-    if swaths2stats_proc.returncode != 0:
-        raise NonZeroReturnValueException(swaths2stats_proc.returncode, 'swaths2stats')
-
-    return
-
-def read_swath_windows(dia_mzML):
-    
-    context = ET.iterparse(dia_mzML, events=("start", "end"))
-
-    windows = {}
-    for event, elem in context:
-
-        if event == "end" and elem.tag == '{http://psi.hupo.org/ms/mzml}isolationWindow':
-            il_target = None
-            il_lower = None
-            il_upper = None
-            for cvParam in elem.findall('{http://psi.hupo.org/ms/mzml}cvParam'):
-
-                name = cvParam.get('name')
-                value = cvParam.get('value')
-
-                if (name == 'isolation window target m/z'):
-                    il_target = value
-                elif (name == 'isolation window lower offset'):
-                    il_lower = value
-                elif (name == 'isolation window upper offset'):
-                    il_upper = value
-
-            if not il_target in windows:
-                windows[il_target] = (il_lower, il_upper)
-            else:
-                lower, upper = windows[il_target]
-                assert (il_lower == lower)
-                assert (il_upper == upper)
-                return windows
-
-    return windows
-
-
-def create_swath_window_files(dia_mzML):
-
-    windows = read_swath_windows(dia_mzML)
-
-    swaths = []
-    for x in windows:
-        target_str = x
-        lower_str, upper_str = windows[x]
-        target = float(target_str)
-        lower = float(lower_str)
-        upper = float(upper_str)
-        assert (lower > 0)
-        assert (upper > 0)
-        swaths.append((target - lower, target + upper))
-        
-    swaths.sort(key=lambda tup: tup[0])
-
-    tswaths = []
-    tswaths.append(swaths[0])
-    for i in range(1, len(swaths)):
-        if swaths[i-1][1] > swaths[i][0]:
-            lower_prev, upper_prev = swaths[i-1]
-            lower, upper = swaths[i]
-            assert (upper_prev < upper)
-            tswaths.append((upper_prev, upper))
-        else:
-            tswaths.append(swaths[i])
-
-    assert (len(swaths) == len(tswaths))
-            
-    with open("swath-windows.txt", "w") as fh_swaths, open("truncated-swath-windows.txt", "w") as fh_tswaths:
-        fh_tswaths.write("LowerOffset\tHigherOffset\n")
-
-        for i in range(len(swaths)):
-            fh_swaths.write(str(swaths[i][0]) + "\t" + str(swaths[i][1])  + "\n")
-            fh_tswaths.write(str(tswaths[i][0]) + "\t" + str(tswaths[i][1])  + "\n")
-
-    return swaths, tswaths
-            
-    
 if __name__=="__main__":
 
     parser = argparse.ArgumentParser(description='DIA Pipeline')
 
-    parser.add_argument('--in-DDA-mzXML',
-                        nargs='+',
+    parser.add_argument('--project-name',
                         action='store',
-                        dest='in_dda_mzXML',
+                        dest='project_name',
                         required=True,
                         default=None,
-                        help='Raw MSMS files for DDA library')
+                        help='Project name. A result folder with given name will be created.')
 
-    parser.add_argument('--in-DIA-mzML',
+    parser.add_argument('--library-data',
                         nargs='+',
                         action='store',
-                        dest='in_dia_mzML',
+                        dest='library_DDA',
                         required=False,
                         default=None,
-                        help='Raw MSMS DIA files')
+                        help='MSMS files for DDA library in raw or mzXML')
 
-    parser.add_argument('--worktempdir', 
+    parser.add_argument('--sample-data',
+                        nargs='+',
                         action='store',
-                        dest='worktempdir',
-                        required=False,
-                        default="./",
-                        help='directory for tmp')
-
-    parser.add_argument('--db', 
-                        action='store',
-                        dest='db',
-                        required=False,
+                        dest='sample_DIA',
+                        required=True,
                         default=None,
-                        help='Fasta file of the database of peptide search space')
+                        help='MSMS DIA sample files in raw or mzML format')
 
-    parser.add_argument('--db-with-decoys', 
+    parser.add_argument('--databases',
+                        nargs='+',
                         action='store',
-                        dest='db_with_decoys',
-                        required=False,
+                        dest='databases',
+                        required=True,
                         default=None,
-                        help='Fasta file of the database of peptide search space has already decoys')
+                        help='Fasta files of the database of peptide search space')
 
     parser.add_argument('--comet-cfg-template', 
                         action='store',
@@ -661,13 +87,6 @@ if __name__=="__main__":
                         default="/opt/diatools/xtandem_settings.xml",
                         required=False,
                         help='XTandem config template file.')
-
-    # parser.add_argument('--out', 
-    #                     action='store',
-    #                     dest='out',
-    #                     required=True,
-    #                     default=None,
-    #                     help='Output file to be written')
 
     parser.add_argument('--library-FDR', 
                         action='store',
@@ -688,156 +107,604 @@ if __name__=="__main__":
                         action='store',
                         dest='threads',
                         required=False,
-                        default="4",
-                        help='Set amount of threads. [default: 4]')
-
-    # parser.add_argument('--iRT-file', 
-    #                     action='store',
-    #                     dest='iRT_file',
-    #                     required=True,
-    #                     help='iRT file.')
-
-    # parser.add_argument('--iRT-assay-library', 
-    #                     action='store',
-    #                     dest='iRT_assay_library',
-    #                     required=True,
-    #                     help='iRT assay library [TraML].')
-
-    # parser.add_argument('--swaths-file', 
-    #                     action='store',
-    #                     dest='swaths_file',
-    #                     default=None,
-    #                     required=False,
-    #                     help='SWATH windows in RAW data.')
-
-    # parser.add_argument('--fixed-swaths-file', 
-    #                     action='store',
-    #                     dest='fixed_swaths_file',
-    #                     default=None,
-    #                     required=False,
-    #                     help='SWATH windows with fixed offsets..')
-
-    parser.add_argument('--logfile', 
-                        action='store',
-                        dest='logfile',
-                        required=False,
-                        default="log.txt",
-                        help='Log filename. [default: log.txt]')
+                        default=None,
+                        help='Set amount of threads. [default: auto]')
 
     parser.add_argument('--design-file', 
                         action='store',
                         dest='design_file',
                         required=False,
                         default=None,
-                        help='Log filename. [default: log.txt]')
+                        help='Design file to be used in the differential expression analysis.')
 
     parser.add_argument('--retain-tmp-files', 
                         action='store_true',
                         dest='retain_tmp_files',
                         required=False,
                         default=False,
-                        help='Dont delete temp files.')
+                        help='Dont delete temp files. Used for debug purposes.')
 
-    parser.add_argument('--use-msgf', 
-                        action='store_true',
-                        dest='use_msgf',
+    parser.add_argument('--search-engines',
+                        nargs='+',
+                        action='store',
+                        dest='search_engines',
                         required=False,
-                        default=False,
-                        help='Use MS-GF+ search engine. [Experimental feature.]')
-
-    parser.add_argument('--use-comet', 
-                        action='store_true',
-                        dest='use_comet',
-                        required=False,
-                        default=False,
-                        help='Use Comet search engine.')
-
-    parser.add_argument('--use-xtandem', 
-                        action='store_true',
-                        dest='use_xtandem',
-                        required=False,
-                        default=False,
-                        help='Use X!Tandem search engine.')
+                        default=["comet", "xtandem"],
+                        help='Specify search engines to be used. Default: comet and xtandem')
 
     args = parser.parse_args()
 
-    worktempdir = args.worktempdir
+    cwd = os.getcwd()
 
     delete_temp_files_flag = not args.retain_tmp_files
     
-    log_fh = open(args.logfile, "w")
-    logline("Pipeline command line: " + " ".join(sys.argv))
+    max_threads = os.cpu_count()
+    if not max_threads:
+        max_threads = 1
 
-    if args.db:
-        with open(args.db, "r") as fh:
-            decoy_db_file = decoyDB(fh)
-    elif args.db_with_decoys:
-        decoy_db_file = args.db_with_decoys
+    if args.threads:
+        max_threads = args.threads
+
+    result_root = "/run-files"
+
+    project = args.project_name
+
+    cwd = os.path.join(result_root, project)
+
+    if not os.path.exists(cwd):
+        os.mkdir(cwd)
+
+    analysis_name = project
+    sample_files = args.sample_DIA
+    library_files = args.library_DDA
+    database_files = args.databases
+    pvalue = args.library_FDR
+    trig_target_pvalue = args.feature_alignment_FDR[0]
+    trig_max_pvalue = args.feature_alignment_FDR[1]
+
+    options = []
+
+    # if library DDA files are not found build  
+    if not args.library_DDA:
+        options.append("use_speudospectra_flag")
+
+    if "comet" in args.search_engines:
+        options.append("use_comet_flag")
+        
+    if "xtandem" in args.search_engines:
+        options.append("use_xtandem_flag")
+        
+    delete_tmp_files_flag = not args.retain_tmp_files
+
+    cfgfile = os.path.join(cwd, "config.txt")
+
+    scan = None
+    data = None
+
+    if not os.path.isfile(cfgfile):
+
+        cfg = {
+            "analysis_name": analysis_name, 
+            "files": {
+                "samples": sample_files, 
+                "library": library_files, 
+                "database": database_files
+            }, 
+            "pvalue": pvalue,
+            "trig_target_pvalue": trig_target_pvalue, 
+            "trig_max_pvalue": trig_max_pvalue, 
+            "options": options
+        }
+
+        with open(cfgfile, "w") as fh:
+            json.dump(cfg, fh)
+
     else:
-        print("Need to provide sequence database.")
-        exit(1)
+        scan = workflow.scan_project_phases(project, result_root)
+        if not "config" in scan:
+            print ("Config not found from existing project.")
+            sys.exit(1)
+        data = scan["config"]
 
-    swaths_min = 0
-    swaths_max = 0
-       
-    if args.in_dia_mzML:
-       swaths, tswaths = create_swath_window_files(args.in_dia_mzML[0])
-       swaths_min = swaths[0][0]
-       swaths_max = swaths[-1][1]
+    # Sanity check here
 
-    assert (swaths_min < swaths_max)
-       
-    pepXMLs = []
+    # 1) At least one DIA file
+    
+    analysis_state = workflow.State(project)
+    event  = workflow.Event()
 
-
-    if args.use_msgf:
-        runMSGFPlus(decoy_db_file, args.in_dda_mzXML, args.threads)
-        pepXMLs.append("interact_msgf_pep.xml")
-        
-    if args.use_comet:
-        runComet(args.comet_cfg_template, decoy_db_file, args.in_dda_mzXML)
-        pepXMLs.append("interact_comet_pep.xml")
-
-    if args.use_xtandem:
-        runXTandem(args.xtandem_cfg_template, decoy_db_file, args.in_dda_mzXML)
-        pepXMLs.append("interact_xtandem_pep.xml")
-
-
-    if len(pepXMLs) > 1:
-        pepXMLFile = "iprofet.peps.xml"
-        combine_search_engine_results("DECOY_", \
-                                      pepXMLFile, \
-                                      decoy_db_file, \
-                                      args.threads, \
-                                      pepXMLs)
-    elif len(pepXMLs) == 1:
-        pepXMLFile = pepXMLs[0]
+    if scan: # TODO
+        log_name = "rerun-log.txt"
     else:
-        print("No search engine results. ")
-        sys.exit(1)
+        log_name = "log.txt"
+
+    with open(os.path.join(cwd, log_name), "w") as log_fh:
+
+        logline(log_fh, "Pipeline command line: " + " ".join(sys.argv))
+        logline(log_fh, "Option list: " + "; ".join(options))
         
-    buildDIALibrary("DECOY_", \
-                    pepXMLFile, \
-                    decoy_db_file, \
-                    "/opt/diatools/iRT.txt", \
-                    "swath-windows.txt", \
-                    args.library_FDR, \
-                    args.library_FDR, \
-                    swaths_min,
-                    swaths_max)
+        # Convert DIA data to open format
+
+        extensions = set()
+        for filename in sample_files:
+            extension = os.path.splitext(filename)[1].lower()
+            extensions.add(extension)
+
+        extensions = list(extensions)
+
+        # TODO: Return the actual error
+        if len(extensions) > 1:
+            print("A single input type allowed, multile file types found (" + ", ".join(extensions) + ")")
+            sys.exit(1)
+
+        # TODO: Return the actual error
+        if extension not in [".mzml", ".mzxml", ".raw"]:
+            print("Unknown extension (" + extension + ") found.")
+            sys.exit(1)
+
+        if (extension == ".raw"):
+
+            if not os.path.exists("/wineprefix64"):
+                print("This version of diatools does not support raw files.")
+                sys.exit(1)
+
+            if scan and "conv_DIA" in scan and scan["conv_DIA"]:
+                print ("Detected existing converted DIA files.")
+                None
+
+            else:
+                phaseID = analysis_state.createPhase("Converting RAW DIA files")
+                workflow.convertRAW(\
+                    event, \
+                    log_fh,\
+                    analysis_state.getPhaseData(phaseID), \
+                    cwd, \
+                    sample_files, \
+                    True, \
+                    "mzml",
+                    "DIA")
+
+            if event.kill_flag:
+                sys.exit(1)
+
+            # replace sample files with converted versions
+            sample_files = [os.path.join(cwd, "DIA", x) for x in os.listdir(os.path.join(cwd, "DIA"))]
 
 
-    if args.in_dia_mzML:
+        # Convert DDA data to open format
 
-        assert len(args.feature_alignment_FDR) == 2
+        if library_files:
+
+            extensions = set()
+            extension = None
+
+            for filename in library_files:
+                extension = os.path.splitext(filename)[1].lower()
+                extensions.add(extension)
+
+            extensions = list(extensions)
+
+            # TODO: Return the actual error
+            if len(extensions) > 1:
+                print("A single input type allowed, multile file types found (" + ", ".join(extensions) + ")")
+                sys.exit(1)
+
+            # TODO: Return the actual error
+            if extension not in [".mzml", ".mzxml", ".raw"]:
+                print("Unknown extension (" + extension + ") found.")
+                sys.exit(1)
+
+            if (extension == ".raw"):
+
+                if not os.path.exists("/wineprefix64"):
+                    print("This version of diatools does not support raw files.")
+                    sys.exit(1)
+
+                if scan and "conv_DDA" in scan and scan["conv_DDA"]:
+                    print ("Detected existing converted DDA files.")
+                    None
+
+                else:
+                    phaseID = analysis_state.createPhase("Converting RAW DDA files (+picking peaks)")
+                    workflow.convertRAWqtofpeakpicker(\
+                        event, \
+                        log_fh, \
+                        analysis_state.getPhaseData(phaseID), \
+                        cwd, \
+                        library_files, \
+                        "DDA")
+
+                if event.kill_flag:
+                    sys.exit(1)
+                            
+                # replace library raw files with converted versions
+                library_files = [os.path.join(cwd, "DDA", x) for x in os.listdir(os.path.join(cwd, "DDA"))]
+
+
+        swaths_min = 0
+        swaths_max = 0
+
+        swaths, tswaths = workflow.create_swath_window_files(cwd, sample_files[0])
+        swaths_min = swaths[0][0]
+        swaths_max = swaths[-1][1]
+
+        pseudospectrafiles = []
+        if "use_speudospectra_flag" in options:
+
+            if scan and "pseudospectra" in scan and scan["pseudospectra"]:
+                print ("Detected existing converted DDA files.")
+                pseudospectrafiles = scan["pseudospectrafiles"]
+                None
+
+            else:
+                phaseID = analysis_state.createPhase("Building pseudospectra")
+                pseudospectrafiles = workflow.runDiaumpire(\
+                    event, \
+                    log_fh, \
+                    analysis_state.getPhaseData(phaseID), \
+                    cwd, \
+                    sample_files, \
+                    "libfree")
+
+            if event.kill_flag:
+                sys.exit(1)
+
+        # BUILD SEQUENCE DATABASE
+
+        db_filename = "DB.fasta"
+        decoy_db_file = "DB_with_decoys.fasta"
+
+        if scan and "DB" in scan and scan["DB"]:
+            print ("Detected existing sequence database")
+        else:
+            phaseID = analysis_state.createPhase("Building database")
+            workflow.build_database(\
+                event, \
+                log_fh, \
+                analysis_state.getPhaseData(phaseID), \
+                cwd, \
+                database_files, \
+                db_filename, \
+                decoy_db_file)
+
+            if event.kill_flag:
+                sys.exit(1)
+
+
+        # BUILD lib & pseudolib peptide files
+
+        libmethod_pepXMLs = []
+        libfreemethod_pepXMLs = []
+
+        if "use_comet_flag" in options:
+
+            comet_cfg = "/opt/diatools/comet.params.template"
+
+            if library_files:
+
+                if scan and "comet_peptides" in scan and scan["comet_peptides"]:
+                    print ("Detected existing Comet spectra search results")
+
+                else:
+
+                    # Cleanup
+
+                    filenames = \
+                    ["interact_comet_pep-MODELS.html", \
+                    "interact_comet_pep.xml", \
+                    "interact_comet_pep.xml.index", \
+                    "interact_comet_pep.xml.RTcoeff", \
+                    "interact_comet_pep.xml.RTstats"]
+
+                    for filename in filenames:
+                        filepath = os.path.join(cwd, filename)
+                        if os.path.isfile(filepath):
+                            os.remove(filepath)
+
+                    # Run Comet
+
+                    existing_pep_xmls = None
+                    if scan and "samples_generated_by_comet" in scan:
+                        existing_pep_xmls = scan["samples_generated_by_comet"]
+
+                    phaseID = analysis_state.createPhase("Speclib - Matching sequences [Comet]")
+                    workflow.runComet(\
+                        event, \
+                        log_fh, \
+                        analysis_state.getPhaseData(phaseID), \
+                        cwd, \
+                        comet_cfg, \
+                        decoy_db_file, \
+                        library_files, \
+                        existing_pep_xmls, \
+                        "interact_comet_pep.xml", \
+                        cwd, \
+                        delete_tmp_files_flag)
+
+                if event.kill_flag:
+                    sys.exit(1)
+
+                libmethod_pepXMLs.append("interact_comet_pep.xml")
+
+            if pseudospectrafiles:
+
+                if scan and "comet_pseudo_peptides" in scan and scan["comet_pseudo_peptides"]:
+                    print ("Detected existing Comet pseudo spectra search results")
+
+                else:
+
+                    # Cleanup
+
+                    filenames = \
+                    ["interact_comet_pseudo_pep-MODELS.html", \
+                    "interact_comet_pseudo_pep.xml", \
+                    "interact_comet_pseudo_pep.xml.index", \
+                    "interact_comet_pseudo_pep.xml.RTcoeff", \
+                    "interact_comet_pseudo_pep.xml.RTstats"]
+
+                    for filename in filenames:
+                        filepath = os.path.join(cwd, filename)
+                        if os.path.isfile(filepath):
+                            os.remove(filepath)
+
+                    existing_pep_xmls = None
+                    if scan and "pseudo_samples_generated_by_comet" in scan:
+                        existing_pep_xmls = scan["pseudo_samples_generated_by_comet"]
+
+                    # Run Comet for speudospectrafiles
+
+                    phaseID = analysis_state.createPhase("Pseudospeclib - Matching sequences [Comet]")
+                    workflow.runComet(\
+                        event, \
+                        log_fh, \
+                        analysis_state.getPhaseData(phaseID), \
+                        cwd, \
+                        comet_cfg, \
+                        decoy_db_file, \
+                        pseudospectrafiles, \
+                        existing_pep_xmls, \
+                        "interact_comet_pseudo_pep.xml", \
+                        cwd, \
+                        delete_tmp_files_flag)
+
+                if event.kill_flag:
+                    sys.exit(1)
+
+                libfreemethod_pepXMLs.append("interact_comet_pseudo_pep.xml")            
+
+        if "use_xtandem_flag" in options:
+            xtandem_cfg = "/opt/diatools/xtandem_settings.xml"
+            if library_files:
+
+                if scan and "xtandem_peptides" in scan and scan["xtandem_peptides"]:
+                    print ("Detected existing X!Tandem spectra search results")
+                else:
+
+                    # Cleanup
+
+                    filenames = [\
+                    "interact_xtandem_pep-MODELS.html   ", \
+                    "interact_xtandem_pep.xml", \
+                    "interact_xtandem_pep.xml.index", \
+                    "interact_xtandem_pep.xml.RTcoeff   ", \
+                    "interact_xtandem_pep.xml.RTstats   "]
+
+                    for filename in filenames:
+                        filepath = os.path.join(cwd, filename)
+                        if os.path.isfile(filepath):
+                            os.remove(filepath)
+
+                    # Run X!Tandem
+
+                    existing_pep_xmls = None
+                    if scan and "samples_generated_by_xtandem" in scan:
+                        existing_pep_xmls = scan["samples_generated_by_xtandem"]
+
+                    phaseID = analysis_state.createPhase("Speclib - Matching sequences [X!Tandem]")
+                    workflow.runXTandem(\
+                        event, \
+                        log_fh, \
+                        analysis_state.getPhaseData(phaseID), \
+                        cwd, \
+                        xtandem_cfg, \
+                        decoy_db_file, \
+                        library_files, \
+                        existing_pep_xmls, \
+                        "interact_xtandem_pep.xml", \
+                        cwd, \
+                        delete_tmp_files_flag)
+
+                if event.kill_flag:
+                    sys.exit(1)
+
+                libmethod_pepXMLs.append("interact_xtandem_pep.xml")
+
+            if pseudospectrafiles:
+
+                if scan and "xtandem_pseudo_peptides" in scan and scan["xtandem_pseudo_peptides"]:
+                    print ("Detected existing X!Tandem pseudo spectra search results")
+
+                else:
+
+                    # Cleanup
+
+                    filenames = [\
+                    "interact_xtandem_pseudo_pep-MODELS.html", \
+                    "interact_xtandem_pseudo_pep.xml", \
+                    "interact_xtandem_pseudo_pep.xml.index", \
+                    "interact_xtandem_pseudo_pep.xml.RTcoeff", \
+                    "interact_xtandem_pseudo_pep.xml.RTstats"]
+
+                    for filename in filenames:
+                        filepath = os.path.join(cwd, filename)
+                        if os.path.isfile(filepath):
+                            os.remove(filepath)
+
+                    # Run X!Tandem for speudospectrafiles
+
+                    existing_pep_xmls = None
+                    if scan and "pseudo_samples_generated_by_xtandem" in scan:
+                        existing_pep_xmls = scan["pseudo_samples_generated_by_xtandem"]
+
+                    phaseID = analysis_state.createPhase("Pseudospeclib - Matching sequences [X!Tandem]")
+                    workflow.runXTandem(\
+                        event, \
+                        log_fh, \
+                        analysis_state.getPhaseData(phaseID), \
+                        cwd, \
+                        xtandem_cfg, \
+                        decoy_db_file, \
+                        pseudospectrafiles, \
+                        existing_pep_xmls, \
+                        "interact_xtandem_pseudo_pep.xml",
+                        cwd, \
+                        delete_tmp_files_flag)
+
+                if event.kill_flag:
+                    sys.exit(1)
+
+                libfreemethod_pepXMLs.append("interact_xtandem_pseudo_pep.xml")         
+
+        if scan and "speclib_cons" in scan and scan["speclib_cons"]:
+
+            print ("Detected existing Spectrum library.")
+
+        else:
+
+            phaseID = analysis_state.createPhase("Building Library")
+
+            # Cleanup
+
+            filenames = \
+            ["SpecLib_cons_decoy.TraML",\
+            "SpecLib_cons_openswath.tsv",\
+            "SpecLib_cons.pepidx",\
+            "SpecLib_cons.spidx",\
+            "SpecLib_cons.splib",\
+            "SpecLib_cons.sptxt",\
+            "SpecLib_cons.TraML",\
+            "SpecLib_libfree.pepidx",\
+            "SpecLib_libfree.spidx",\
+            "SpecLib_libfree.splib",\
+            "SpecLib_libfree.sptxt",\
+            "SpecLib_lib.pepidx",\
+            "SpecLib_lib.spidx",\
+            "SpecLib_lib.splib",\
+            "SpecLib_lib.sptxt",\
+            "SpecLib_merged.pepidx",\
+            "SpecLib_merged.spidx",\
+            "SpecLib_merged.splib",\
+            "SpecLib_merged.sptxt",\
+            "spectrast.log"]
+
+            for filename in filenames:
+                filepath = os.path.join(cwd, filename)
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+
+            for method in ["lib", "libfree"]:
+                mayu_folder = method+"_mayu"
+                directory = os.path.join(cwd, mayu_folder)
+                # print ("DEBUG: CHECKING TO REMOVE DIR " + directory)
+                if os.path.isdir(directory):
+                    shutil.rmtree(directory)
+                    # print ("DEBUG: REMOVED " + directory)
+
+            workflow.buildlib(\
+                event,\
+                log_fh,\
+                analysis_state.getPhaseData(phaseID),\
+                cwd, \
+                "DECOY_", \
+                decoy_db_file, \
+                str(max_threads), \
+                libmethod_pepXMLs, \
+                libfreemethod_pepXMLs, \
+                "/opt/diatools/iRT.txt", \
+                "swath-windows.txt", \
+                pvalue, \
+                pvalue, \
+                swaths_min, \
+                swaths_max)
+
+        if event.kill_flag:
+            sys.exit(1)
+
+        if scan and "matrices" in scan and scan["matrices"]:
+
+            print ("Detected existing matrices.")
         
-        buildDIAMatrix(args.in_dia_mzML, \
-                       "truncated-swath-windows.txt", \
-                       args.feature_alignment_FDR[0], \
-                       args.feature_alignment_FDR[1], \
-                       args.threads, \
-                       "/opt/diatools/iRTAssayLibrary.TraML",\
-                       args.design_file)
+        else:
+
+            # Cleanup
+
+            postfixes = ["-DIA_cutoffs.txt",\
+            "-DIA_dscores_top_decoy_peaks.txt",\
+            "-DIA_dscores_top_target_peaks.txt",\
+            "-DIA_full_stat.csv",\
+            "-DIA_mayu.csv",\
+            "-DIA_mayu.cutoff",\
+            "-DIA_mayu.fasta",\
+            "-DIA_qvalues.txt",\
+            "-DIA_report.pdf",\
+            "-DIA_scorer.bin",\
+            "-DIA_summary_stat.csv",\
+            "-DIA_svalues.txt",\
+            "-DIA.tsv",\
+            "-DIA_weights.txt",\
+            "-DIA_with_dscore-0_0-None.tr",\
+            "-DIA_with_dscore.csv",\
+            "-DIA_with_dscore_filtered.csv"]
+
+            for filename in sample_files:
+                filepath = os.path.join(cwd, os.path.basename(filename))
+                for postfix in postfixes:
+                    if filepath.endswith(postfix) and os.path.isfile(filepath):
+                        os.remove(filepath)
+
+            filenames = \
+                ["DIA-analysis-result.csv",\
+                "DIA-peptide-matrix.tsv",\
+                "DIA-protein-matrix.tsv"]
+
+            for filename in filenames:
+                filepath = os.path.join(cwd, filename)
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+
+            # Run OpenSWATH and building the DIA matrices
+            phaseID = analysis_state.createPhase("Searching peptides from DIA spectrum")
+
+            workflow.buildDIAMatrix(\
+                event, \
+                log_fh, \
+                analysis_state.getPhaseData(phaseID), \
+                cwd, \
+                sample_files, \
+                "truncated-swath-windows.txt", \
+                trig_target_pvalue, \
+                trig_max_pvalue, \
+                str(max_threads), \
+                "/opt/diatools/iRTAssayLibrary.TraML",\
+                None) # TODO: insert design file here
+
+        if event.kill_flag:
+            sys.exit(1)
+
+        with notification_lock:
+            notifications.append(
+                {
+                    "title": "Analysis completed",
+                    "text": "Analysis of project " + project + " was completed successfully.", 
+                }
+            )
+
+
+
+
+
+
+
 
 
     sys.exit(0)

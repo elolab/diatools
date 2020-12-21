@@ -8,7 +8,7 @@ suppressPackageStartupMessages(library("PECA"))
 parser = ArgumentParser()
 
 parser$add_argument("--input", 
-                    help = "DIA-matrix from Diatools.")
+                    help = "DIA-matrix from MPP.")
 
 parser$add_argument("--design-file",
 	dest="designfile",
